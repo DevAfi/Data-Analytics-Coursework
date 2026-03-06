@@ -86,9 +86,46 @@ print(f"   Memory usage: {df.memory_usage(deep=True).sum() / 1024**2:.2f} MB")
 
 # TASK 2.2
 
+print("\n7. Task 2.2: Average Ratings and 95% Bootstrap Confidence Intervals")
+print("=" * 80)
+
 avg_rating = (
-    df.groupby(['bookId', 'Title'])['rating'].mean().reset_index(name='average_rating')
+    df.groupby(['bookId', 'Title'])['rating']
+      .mean()
+      .reset_index(name='average_rating')
 )
 
-all_ratings = avg_rating.sort_values('average_rating', ascending=False)
-print(all_ratings.head(10))
+top10 = (
+    avg_rating.sort_values('average_rating', ascending=False)
+    .head(10)
+    .copy()
+)
+
+
+def bootstrap_ci(ratings, bootstrap_num=1000, sample_size=100):
+    ratings = np.array(ratings.dropna())
+    bootstrap_means = []
+
+    for _ in range(bootstrap_num):
+        sample = np.random.choice(ratings, size=sample_size, replace=True)
+        bootstrap_means.append(sample.mean())
+
+    lower_bound = np.percentile(bootstrap_means, 2.5)
+    upper_bound = np.percentile(bootstrap_means, 97.5)
+    return lower_bound, upper_bound
+
+
+ci_lows = []
+ci_highs = []
+
+for book_id in top10['bookId']:
+    book_ratings = df.loc[df['bookId'] == book_id, 'rating']
+    low, high = bootstrap_ci(book_ratings)
+    ci_lows.append(low)
+    ci_highs.append(high)
+
+top10['ci_low'] = ci_lows
+top10['ci_high'] = ci_highs
+
+print("\nTop 10 books by average rating:")
+print(top10.to_string(index=False))
