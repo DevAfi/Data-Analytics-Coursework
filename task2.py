@@ -1,6 +1,8 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 
 def print_section(title):
@@ -156,3 +158,52 @@ else:
         "unstable (often extreme) average ratings. A minimum rating_count threshold "
         "reduces noise and makes average ratings more reliable."
     )
+
+# Task 2.4: binary like/dislike transform and content-based recommendations
+df['rating_binary'] = np.where(df['rating'] >= 3.6, 1, -1)
+
+print_section("Task 2.4")
+print("Binary rating transform using threshold 3.6:")
+print(df['rating_binary'].value_counts().rename_axis('class').to_string())
+
+selected_features = ['Title', 'Author', 'Genre', 'SubGenre', 'Publisher']
+books_content_df = df[['bookId'] + selected_features].drop_duplicates(
+    subset='bookId'
+).reset_index(drop=True).copy()
+
+for feature in selected_features:
+    books_content_df[feature] = books_content_df[feature].fillna('Unknown').astype(str)
+
+books_content_df['combined_features'] = books_content_df[selected_features].agg(
+    ' '.join, axis=1
+)
+
+count_vectorizer = CountVectorizer()
+count_matrix = count_vectorizer.fit_transform(books_content_df['combined_features'])
+cosine_sim_matrix = cosine_similarity(count_matrix, count_matrix)
+
+print("\nCosine similarity matrix shape:")
+print(cosine_sim_matrix.shape)
+
+target_title = 'Orientalism'
+target_matches = books_content_df.index[books_content_df['Title'] == target_title].tolist()
+
+if not target_matches:
+    print(f"\nBook '{target_title}' not found in the current merged dataset.")
+else:
+    target_idx = target_matches[0]
+
+    # Matrix-vector product: similarity scores against all books from one query book.
+    query_vector = np.zeros(cosine_sim_matrix.shape[0], dtype=float)
+    query_vector[target_idx] = 1.0
+    similarity_scores = cosine_sim_matrix @ query_vector
+
+    ranked_indices = np.argsort(similarity_scores)[::-1]
+    ranked_indices = [idx for idx in ranked_indices if idx != target_idx][:10]
+
+    recommendations = books_content_df.loc[ranked_indices, ['Title']].copy()
+    recommendations['similarity'] = similarity_scores[ranked_indices]
+    recommendations = recommendations.sort_values('similarity', ascending=False)
+
+    print(f"\nTop 10 recommendations for a user who liked '{target_title}':")
+    print(recommendations.to_string(index=False))
