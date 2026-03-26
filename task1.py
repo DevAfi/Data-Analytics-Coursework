@@ -6,35 +6,25 @@ import re
 
 
 def parse_iso_duration(duration_str):
-    """
-    Parse ISO 8601 duration format (e.g., PT30M, PT1H) and convert to minutes.
-    Returns total minutes as integer.
-    """
+    # Parsing ISO duration so it doesnt fail
     if not duration_str:
         return 0
     
-    # Remove 'PT' prefix
     duration_str = duration_str.replace('PT', '')
-    
     total_minutes = 0
     
-    # Extract hours
     hours_match = re.search(r'(\d+)H', duration_str)
     if hours_match:
         total_minutes += int(hours_match.group(1)) * 60
     
-    # Extract minutes
     minutes_match = re.search(r'(\d+)M', duration_str)
     if minutes_match:
         total_minutes += int(minutes_match.group(1))
     
     return total_minutes
 
-
+# Adding together the prep and cook time, beacause just cook time isnt total
 def format_total_time(prep_time, cook_time):
-    """
-    Combine prep time and cook time, format as string (e.g., "90 minutes" or "1 hour 30 minutes").
-    """
     prep_minutes = parse_iso_duration(prep_time) if prep_time else 0
     cook_minutes = parse_iso_duration(cook_time) if cook_time else 0
     total_minutes = prep_minutes + cook_minutes
@@ -53,25 +43,15 @@ def format_total_time(prep_time, cook_time):
         return f"{hours} hour{'s' if hours > 1 else ''} {minutes} minutes"
 
 
+# Scrapes BBC data
 def collect_page_data(url):
-    """
-    Scrapes BBC recipe page and returns a pandas DataFrame with recipe data.
-    
-    Args:
-        url (str): BBC recipe URL
-        
-    Returns:
-        pandas.DataFrame: DataFrame with columns ['title', 'total_time', 'image', 'ingredients', 
-                         'rating_val', 'rating_count', 'category', 'cuisine', 'diet', 'vegan', 
-                         'vegetarian', 'url']
-    """
     try:
-        # Fetch the webpage
         response = requests.get(url, timeout=10)
-        response.raise_for_status()  # Raise an exception for bad status codes
+        response.raise_for_status()  # Raise exception if bad status
         
-        # Parse HTML
-        soup = BeautifulSoup(response.text, 'html.parser')
+        # Kept getting strange characters so added this
+        html_text = response.content.decode('utf-8', errors='replace')
+        soup = BeautifulSoup(html_text, 'html.parser')
         
         # Find JSON-LD script tag containing recipe data
         scripts = soup.find_all('script', type='application/ld+json')
@@ -82,7 +62,6 @@ def collect_page_data(url):
                 data = json.loads(script.string)
                 # Check if it's a graph structure or direct recipe
                 if '@graph' in data:
-                    # Find Recipe type in graph
                     for item in data['@graph']:
                         if item.get('@type') == 'Recipe':
                             recipe_data = item
@@ -101,7 +80,7 @@ def collect_page_data(url):
         # Extract data fields
         title = recipe_data.get('name') or recipe_data.get('headline', '')
         
-        # Calculate total time
+        # Calculate total time using the prep+cook function i made
         prep_time = recipe_data.get('prepTime', '')
         cook_time = recipe_data.get('cookTime', '')
         total_time = format_total_time(prep_time, cook_time)
@@ -141,7 +120,6 @@ def collect_page_data(url):
         diet_list = []
         for diet in suitable_for_diet:
             if isinstance(diet, str):
-                # Extract diet name from URL (e.g., "http://schema.org/VegetarianDiet" -> "Vegetarian")
                 diet_name = diet.split('/')[-1].replace('Diet', '').title()
                 diet_list.append(diet_name)
         diet = ', '.join(diet_list) if diet_list else ''
@@ -164,11 +142,6 @@ def collect_page_data(url):
         
         df = pd.DataFrame(data)
         
-        # Generate CSV file
-        csv_filename = 'recipe_data.csv'
-        df.to_csv(csv_filename, index=False)
-        print(f"CSV file '{csv_filename}' has been generated successfully.")
-        
         return df
         
     except requests.RequestException as e:
@@ -186,21 +159,36 @@ def collect_page_data(url):
         return pd.DataFrame(columns=columns)
 
 
-# Test the function with at least 3 recipe URLs
 if __name__ == "__main__":
-    # Test URLs - at least 3 recipe pages for higher marks (5-6.5 points)
-    # You can find more BBC recipe URLs at: https://www.bbc.co.uk/food/recipes
     test_urls = [
         'https://www.bbc.co.uk/food/recipes/easiest_ever_banana_cake_42108',
+        'https://www.bbc.co.uk/food/recipes/vegetablecurry_80763',
+        'https://www.bbc.co.uk/food/recipes/quick_butter_saag_with_85874',
+        'https://www.bbc.co.uk/food/recipes/cod_and_chorizo_stew_91004',
+        'https://www.bbc.co.uk/food/recipes/slow_cooker_aubergine_51283',
+        'https://www.bbc.co.uk/food/recipes/satay_sweet_potato_curry_59527',
+        'https://www.bbc.co.uk/food/recipes/steak_diane_with_saut_67797',
     ]
     
     print("Testing collect_page_data function...")
     print("=" * 60)
     
+    all_results = []
+
     for url in test_urls:
         print(f"\nProcessing: {url}")
         df = collect_page_data(url)
+        if not df.empty:
+            all_results.append(df)
         print(f"\nDataFrame shape: {df.shape}")
         print(f"\nDataFrame contents:")
         print(df.to_string())
         print("\n" + "=" * 60)
+
+    if all_results:
+        combined_df = pd.concat(all_results, ignore_index=True)
+        csv_filename = 'recipe_data.csv'
+        combined_df.to_csv(csv_filename, index=False, encoding='utf-8-sig')
+        print(f"\nCSV file '{csv_filename}' has been generated successfully.")
+    else:
+        print("\nNo recipe data was collected; CSV not generated.")
