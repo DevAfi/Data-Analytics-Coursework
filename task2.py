@@ -12,10 +12,13 @@ def print_section(title):
 
 def bootstrap_ci(ratings, n_boot=1000, sample_size=100):
     ratings = np.array(ratings.dropna())
+    if ratings.size == 0:
+        raise ValueError("Cannot bootstrap confidence interval from empty ratings.")
     boot_means = []
+    effective_sample_size = min(sample_size, ratings.size)
 
     for _ in range(n_boot):
-        sample = np.random.choice(ratings, size=sample_size, replace=True)
+        sample = np.random.choice(ratings, size=effective_sample_size, replace=True)
         boot_means.append(sample.mean())
 
     lower = np.percentile(boot_means, 2.5)
@@ -25,7 +28,7 @@ def bootstrap_ci(ratings, n_boot=1000, sample_size=100):
 
 np.random.seed(42)
 
-# Part 2.1: load, combine, inspect and clean the data
+# Task 2.1: load, merge, then handle missing values
 ratings = pd.read_csv('ratings.csv')
 books = pd.read_csv('books_new.csv')
 df = pd.merge(ratings, books, on='bookId', how='inner')
@@ -66,7 +69,7 @@ else:
 print("\nSummary statistics:")
 print(df[numerical_features].describe().to_string())
 
-# Task 2.2: average rating and bootstrap confidence intervals
+# Task 2.2: average rating per book + bootstrap CI for overall mean
 avg_rating = (
     df.groupby(['bookId', 'Title'])['rating']
     .mean()
@@ -79,28 +82,37 @@ top10 = (
     .copy()
 )
 
-ci_lows = []
-ci_highs = []
-
-for book_id in top10['bookId']:
-    book_ratings = df.loc[df['bookId'] == book_id, 'rating']
-    low, high = bootstrap_ci(book_ratings)
-    ci_lows.append(low)
-    ci_highs.append(high)
-
-top10['ci_low'] = ci_lows
-top10['ci_high'] = ci_highs
+overall_ci_low, overall_ci_high = bootstrap_ci(df['rating'], n_boot=1000, sample_size=100)
 
 print_section("Task 2.2")
-print("Top 10 books by average rating with 95% bootstrap confidence intervals:")
+print("Top 10 books by average rating:")
 print(top10.to_string(index=False))
-
-# Task 2.3: add rating_count, analyse relationship, suggest significance threshold
-book_rating_stats = (
-    df.groupby(['bookId', 'Title'])['rating']
-    .agg(average_rating='mean', rating_count='count')
-    .reset_index()
+print(
+    "\n95% bootstrap CI for the overall mean rating "
+    f"(1000 samples of size 100): [{overall_ci_low:.4f}, {overall_ci_high:.4f}]"
 )
+# Task 2.3: add rating_count, check rating vs count, and suggest a sensible cutoff
+# Count ratings straight from ratings.csv so this reflects raw user activity
+rating_count_df = (
+    ratings.groupby('bookId')['rating']
+    .size()
+    .reset_index(name='rating_count')
+)
+avg_rating_df = (
+    ratings.groupby('bookId')['rating']
+    .mean()
+    .reset_index(name='average_rating')
+)
+book_rating_stats = books[['bookId', 'Title']].merge(
+    avg_rating_df,
+    on='bookId',
+    how='left'
+).merge(
+    rating_count_df,
+    on='bookId',
+    how='left'
+)
+book_rating_stats['rating_count'] = book_rating_stats['rating_count'].fillna(0).astype(int)
 
 rating_count_unique = book_rating_stats['rating_count'].nunique()
 if rating_count_unique <= 1:
@@ -116,29 +128,16 @@ print(book_rating_stats.head(15).to_string(index=False))
 
 print("\nCorrelation between average_rating and rating_count:")
 if np.isnan(corr_value):
-    print("Undefined (rating_count is constant in this merged dataset).")
+    print("Undefined (rating_count is constant in the available ratings data).")
 else:
     print(f"{corr_value:.4f}")
 
-# Plot helps show that low-count books can have extreme average ratings.
-plt.figure(figsize=(10, 6))
-plt.scatter(
-    book_rating_stats['rating_count'],
-    book_rating_stats['average_rating'],
-    alpha=0.6
-)
-plt.xscale('log')
-plt.xlabel('Rating Count (log scale)')
-plt.ylabel('Average Rating')
-plt.title('Average Rating vs Number of Ratings per Book')
-plt.grid(alpha=0.25)
-plt.tight_layout()
-plt.savefig('task2_3_rating_vs_count.png', dpi=200)
-plt.close()
+# Quick check for whether low counts give noisy averages
+plot_df = book_rating_stats[book_rating_stats['rating_count'] > 0].copy()
 
-# Data-driven threshold when variation exists; otherwise report observed constant.
-threshold = max(10, int(np.ceil(book_rating_stats['rating_count'].quantile(0.25))))
-significant_ratings = book_rating_stats[book_rating_stats['rating_count'] >= threshold]
+# Pick a threshold from the data when possible.
+threshold = max(10, int(np.ceil(plot_df['rating_count'].quantile(0.25))))
+significant_ratings = plot_df[plot_df['rating_count'] >= threshold]
 
 print(f"\nSuggested significance threshold for rating_count: {threshold}")
 print(
@@ -147,19 +146,16 @@ print(
 )
 if rating_count_unique <= 1:
     print(
-        "Commentary: In this merged dataset (books_new.csv joined with ratings.csv), "
-        "all books have the same rating_count (100). Therefore, no relationship between "
-        "average_rating and rating_count can be inferred here, and any threshold "
-        "suggestion is trivial for this subset."
+        "Commentary: all books have the same rating_count here, "
+        "so this correlation is not meaningful."
     )
 else:
     print(
-        "Commentary: Books with very low rating_count are more likely to show "
-        "unstable (often extreme) average ratings. A minimum rating_count threshold "
-        "reduces noise and makes average ratings more reliable."
+        "Commentary: books with very low rating_count can look unusually high or low "
+        "just by chance. Using a minimum count gives more stable averages."
     )
 
-# Task 2.4: binary like/dislike transform and content-based recommendations
+# Task 2.4: turn ratings into like/dislike and build content-based recs
 df['rating_binary'] = np.where(df['rating'] >= 3.6, 1, -1)
 
 print_section("Task 2.4")
@@ -193,7 +189,7 @@ if not target_matches:
 else:
     target_idx = target_matches[0]
 
-    # Matrix-vector product: similarity scores against all books from one query book.
+    # Matrix-vector product: one query vector against all book vectors.
     query_vector = np.zeros(cosine_sim_matrix.shape[0], dtype=float)
     query_vector[target_idx] = 1.0
     similarity_scores = cosine_sim_matrix @ query_vector

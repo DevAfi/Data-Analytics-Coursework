@@ -8,13 +8,16 @@ from sklearn.model_selection import train_test_split
 from sklearn.neighbors import KNeighborsClassifier, NearestNeighbors
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
+from scipy.sparse import csr_matrix
 
 
+# Just for cleaner output sections
 def print_section(title):
     print(f"\n{title}")
     print("=" * len(title))
 
 
+# Load ratings/books, merge them, then fill missing values
 def load_and_prepare_data():
     ratings_df = pd.read_csv("ratings.csv")
     books_df = pd.read_csv("books_new.csv")
@@ -50,7 +53,7 @@ def build_book_feature_space(merged_df):
     count_matrix = vectorizer.fit_transform(books_content_df["combined_features"])
     cosine_matrix = cosine_similarity(count_matrix, count_matrix)
 
-    # Mapping allows O(1) index lookup for query titles.
+    # Title -> row index map for quick lookup
     title_to_idx = {title: idx for idx, title in enumerate(books_content_df["Title"])}
 
     return books_content_df, count_matrix, cosine_matrix, title_to_idx
@@ -62,7 +65,7 @@ def vec_space_method(book_title, books_content_df, cosine_matrix, title_to_idx, 
 
     target_idx = title_to_idx[book_title]
 
-    # Matrix-vector product (as required): one-hot query vector against similarity matrix.
+    # Matrix-vector product from one-hot query vector
     query_vector = np.zeros(cosine_matrix.shape[0], dtype=float)
     query_vector[target_idx] = 1.0
     similarity_scores = cosine_matrix @ query_vector
@@ -76,27 +79,55 @@ def vec_space_method(book_title, books_content_df, cosine_matrix, title_to_idx, 
     return recs
 
 
-def build_knn_model(count_matrix, n_neighbors=11):
+def build_knn_recommender_data(merged_df):
+    # User-item pivot, then replace missing ratings with zero
+    df_book_feat = merged_df.pivot_table(
+        index="bookId",
+        columns="user_id",
+        values="rating",
+        aggfunc="mean",
+    ).fillna(0)
+
+    knn_matrix = csr_matrix(df_book_feat.values)
+
+    # Keep one title per bookId so recommendations are easy to read
+    book_lookup = (
+        merged_df[["bookId", "Title"]]
+        .drop_duplicates(subset="bookId")
+        .set_index("bookId")
+    )
+    knn_books_df = pd.DataFrame({"bookId": df_book_feat.index}).join(
+        book_lookup, on="bookId", how="left"
+    )
+    knn_books_df["Title"] = knn_books_df["Title"].fillna("Unknown")
+
+    # Title lookup map
+    knn_title_to_pos = {title: idx for idx, title in enumerate(knn_books_df["Title"])}
+
+    return knn_books_df.reset_index(drop=True), knn_matrix, knn_title_to_pos
+
+
+def build_knn_model(knn_matrix, n_neighbors=11):
     knn_model = NearestNeighbors(
         metric="cosine",
         algorithm="auto",
         n_neighbors=n_neighbors,
     )
-    knn_model.fit(count_matrix)
+    knn_model.fit(knn_matrix)
     return knn_model
 
 
-def knn_similarity(book_title, books_content_df, count_matrix, knn_model, title_to_idx, top_k=10):
-    if book_title not in title_to_idx:
+def knn_similarity(book_title, knn_books_df, knn_matrix, knn_model, knn_title_to_pos, top_k=10):
+    if book_title not in knn_title_to_pos:
         raise ValueError(f"Book '{book_title}' not found in catalogue.")
 
-    target_idx = title_to_idx[book_title]
+    target_idx = knn_title_to_pos[book_title]
     distances, indices = knn_model.kneighbors(
-        count_matrix[target_idx],
+        knn_matrix[target_idx],
         n_neighbors=top_k + 1,
     )
 
-    # Drop query book itself.
+    # Remove the query book itself
     neighbor_indices = indices.flatten().tolist()
     neighbor_distances = distances.flatten().tolist()
     pairs = [
@@ -105,7 +136,7 @@ def knn_similarity(book_title, books_content_df, count_matrix, knn_model, title_
         if idx != target_idx
     ][:top_k]
 
-    recs = books_content_df.loc[[idx for idx, _ in pairs], ["bookId", "Title"]].copy()
+    recs = knn_books_df.loc[[idx for idx, _ in pairs], ["bookId", "Title"]].copy()
     recs["similarity"] = [1.0 - dist for _, dist in pairs]
     recs = recs.sort_values("similarity", ascending=False).reset_index(drop=True)
     return recs
@@ -135,7 +166,7 @@ def evaluate_recommenders(
         return len(recommended_ids) / len(catalog_book_ids)
 
     def _personalisation(rec_lists):
-        # Lecture-aligned: build recommendation vectors, cosine matrix, A from upper triangle.
+        # Personalisation = 1 - average upper-triangle cosine similarity
         user_vectors = []
         for rec_df in rec_lists.values():
             vec = np.zeros(len(all_book_ids_sorted), dtype=float)
@@ -254,6 +285,7 @@ def main():
     books_content_df, count_matrix, cosine_matrix, title_to_idx = build_book_feature_space(
         merged_df
     )
+    knn_books_df, knn_matrix, knn_title_to_pos = build_knn_recommender_data(merged_df)
 
     print_section("Task 3.1 - Vector Space Method")
     vec_recs = vec_space_method(
@@ -266,13 +298,13 @@ def main():
     print_recommendation_block("Orientalism", vec_recs)
 
     print_section("Task 3.2 - KNN Similarity Method")
-    knn_model = build_knn_model(count_matrix, n_neighbors=11)
+    knn_model = build_knn_model(knn_matrix, n_neighbors=11)
     knn_recs = knn_similarity(
         "Orientalism",
-        books_content_df,
-        count_matrix,
+        knn_books_df,
+        knn_matrix,
         knn_model,
-        title_to_idx,
+        knn_title_to_pos,
         top_k=10,
     )
     print_recommendation_block("Orientalism", knn_recs)
@@ -289,14 +321,14 @@ def main():
         t, books_content_df, cosine_matrix, title_to_idx, top_k=10
     )
     knn_method_fn = lambda t: knn_similarity(
-        t, books_content_df, count_matrix, knn_model, title_to_idx, top_k=10
+        t, knn_books_df, knn_matrix, knn_model, knn_title_to_pos, top_k=10
     )
 
     vec_lists, knn_lists, eval_df = evaluate_recommenders(
         test_titles, vec_method_fn, knn_method_fn, books_content_df
     )
 
-    # Evaluation definitions follow the KNN lecture (coverage + personalisation).
+    # Coverage + personalisation based on lecture definition
     print("Coverage and Personalisation comparison:")
     print(eval_df.to_string(index=False))
 

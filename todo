@@ -1,3 +1,3 @@
-- CI as a [low, high] not CI ratings
-- Not get count of 100 on ratings
-- use merged books + ratings for everything other than 2.1
+- CI as a [low, high] under the list, not CI of the average rating of specific books ratings
+- Not get count of 100 on every single rating
+- use merged books + ratings for everything other than 2.1?

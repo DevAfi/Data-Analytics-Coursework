@@ -6,7 +6,7 @@ import re
 
 
 def parse_iso_duration(duration_str):
-    # Parsing ISO duration so it doesnt fail
+    # BBC time format is like PT1H30M, so convert it to minutes first
     if not duration_str:
         return 0
     
@@ -23,7 +23,7 @@ def parse_iso_duration(duration_str):
     
     return total_minutes
 
-# Adding together the prep and cook time, beacause just cook time isnt total
+# Need prep + cook for total time
 def format_total_time(prep_time, cook_time):
     prep_minutes = parse_iso_duration(prep_time) if prep_time else 0
     cook_minutes = parse_iso_duration(cook_time) if cook_time else 0
@@ -43,24 +43,24 @@ def format_total_time(prep_time, cook_time):
         return f"{hours} hour{'s' if hours > 1 else ''} {minutes} minutes"
 
 
-# Scrapes BBC data
+# Scrape one BBC recipe page
 def collect_page_data(url):
     try:
         response = requests.get(url, timeout=10)
-        response.raise_for_status()  # Raise exception if bad status
+        response.raise_for_status()  # fail fast if request is bad
         
-        # Kept getting strange characters so added this
+        # Some pages had weird characters, so decode safely
         html_text = response.content.decode('utf-8', errors='replace')
         soup = BeautifulSoup(html_text, 'html.parser')
         
-        # Find JSON-LD script tag containing recipe data
+        # BBC recipe fields are usually in JSON-LD script tags
         scripts = soup.find_all('script', type='application/ld+json')
         recipe_data = None
         
         for script in scripts:
             try:
                 data = json.loads(script.string)
-                # Check if it's a graph structure or direct recipe
+                # Sometimes recipe is direct, sometimes inside @graph
                 if '@graph' in data:
                     for item in data['@graph']:
                         if item.get('@type') == 'Recipe':
@@ -77,15 +77,15 @@ def collect_page_data(url):
         if not recipe_data:
             raise ValueError("Recipe data not found in page")
         
-        # Extract data fields
+        # Pull all fields needed for the required output columns
         title = recipe_data.get('name') or recipe_data.get('headline', '')
         
-        # Calculate total time using the prep+cook function i made
+        # Convert prep/cook into one readable total-time string
         prep_time = recipe_data.get('prepTime', '')
         cook_time = recipe_data.get('cookTime', '')
         total_time = format_total_time(prep_time, cook_time)
         
-        # Extract image URL
+        # Image can be dict/list/string depending on the page
         image_obj = recipe_data.get('image', {})
         if isinstance(image_obj, dict):
             image = image_obj.get('url', '')
@@ -94,29 +94,29 @@ def collect_page_data(url):
         else:
             image = str(image_obj) if image_obj else ''
         
-        # Extract ingredients (join list into string)
+        # Keep ingredients in one comma-separated string
         ingredients_list = recipe_data.get('recipeIngredient', [])
         ingredients = ', '.join(ingredients_list) if ingredients_list else ''
         
-        # Extract rating data
+        # Ratings usually live under aggregateRating
         aggregate_rating = recipe_data.get('aggregateRating', {})
         rating_val = aggregate_rating.get('ratingValue', '')
         rating_count = aggregate_rating.get('ratingCount', '')
         
-        # Extract category and cuisine
+        # Category/cuisine tags
         category = recipe_data.get('recipeCategory', '')
         cuisine = recipe_data.get('recipeCuisine', '')
         
-        # Extract diet information
+        # Diet field can be string or list, so normalize it
         suitable_for_diet = recipe_data.get('suitableForDiet', [])
         if not isinstance(suitable_for_diet, list):
             suitable_for_diet = [suitable_for_diet] if suitable_for_diet else []
         
-        # Check for vegan and vegetarian
+        # Quick boolean flags for vegan/vegetarian
         vegan = 'VeganDiet' in str(suitable_for_diet) or 'vegan' in str(suitable_for_diet).lower()
         vegetarian = 'VegetarianDiet' in str(suitable_for_diet) or 'vegetarian' in str(suitable_for_diet).lower()
         
-        # Format diet list
+        # Make diet names readable instead of raw schema links
         diet_list = []
         for diet in suitable_for_diet:
             if isinstance(diet, str):
@@ -124,7 +124,7 @@ def collect_page_data(url):
                 diet_list.append(diet_name)
         diet = ', '.join(diet_list) if diet_list else ''
         
-        # Create DataFrame
+        # Build dataframe with the exact requested column set
         data = {
             'title': [title],
             'total_time': [total_time],
@@ -146,14 +146,14 @@ def collect_page_data(url):
         
     except requests.RequestException as e:
         print(f"Error fetching URL: {e}")
-        # Return empty DataFrame with correct columns
+        # Return empty df with same schema so later code does not break.
         columns = ['title', 'total_time', 'image', 'ingredients', 'rating_val', 'rating_count', 
                   'category', 'cuisine', 'diet', 'vegan', 'vegetarian', 'url']
         return pd.DataFrame(columns=columns)
     
     except Exception as e:
         print(f"Error processing recipe data: {e}")
-        # Return empty DataFrame with correct columns
+        # Same fallback for any unexpected parsing issue
         columns = ['title', 'total_time', 'image', 'ingredients', 'rating_val', 'rating_count', 
                   'category', 'cuisine', 'diet', 'vegan', 'vegetarian', 'url']
         return pd.DataFrame(columns=columns)
